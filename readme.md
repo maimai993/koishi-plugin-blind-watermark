@@ -78,6 +78,28 @@ bwm.extract
 | `-p, --password <number>` | 图片密码，嵌入与提取必须一致（默认 1） |
 | `-w, --watermarkPassword <number>` | 水印密码，嵌入与提取必须一致（默认 1） |
 
+### 交互式使用（什么都不用记）
+
+直接发 `bwm.embed` 就行，机器人会一步步问你要东西：
+
+```text
+麦麦: bwm.embed
+bot : 好，先告诉我水印文字吧。
+麦麦: 版权所有 maimai 2026
+bot : 请发送（或引用）要处理的图片（60 秒内）
+麦麦: [图片]
+bot : 水印已嵌入 ✅
+      内容：版权所有 maimai 2026
+      位宽 512 bit（图片容量 12696 bit）
+      提取：引用这张图发 bwm.extract 即可
+      [打好水印的图片]
+```
+
+- 文字和图片都给了就直接干活，不会多问
+- 只给了一样就问另一样；文字太长会自动提高位宽
+- 中途想放弃，回一句「**取消**」即可
+- 等待时间由配置项 `promptTimeout` 控制（默认 60 秒，超时会说「等太久啦，已取消」）
+
 ## ⚙️ 配置项
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -86,7 +108,7 @@ bwm.extract
 | `scriptPath` | `string` | `''` | `bwm_cli.py` 的路径，留空用插件自带的 |
 | `timeout` | `number` | `120000` | 单次调用超时（毫秒）。打水印耗时和像素数成正比，大图请调大 |
 | `maxSize` | `number` | `1600` | 打水印前把长边缩到该像素（0 = 不缩放）。缩图能大幅提速 |
-| `bits` | `number` | `512` | 默认位宽，必须是 8 的倍数 |
+| `bits` | `number` | `512` | 默认位宽，必须是 8 的倍数。水印文字比它长时会自动提高位宽（只要图片装得下） |
 | `candidateBits` | `number[]` | `[512, 1024, 256, 2048, 128]` | 提取时依次尝试的候选位宽 |
 | `passwordImage` | `number` | `1` | 图片密码 |
 | `passwordWatermark` | `number` | `1` | 水印密码 |
@@ -95,6 +117,7 @@ bwm.extract
 | `authority` | `number` | `1` | 使用命令所需的最低权限等级 |
 | `logoShape` | `string` | `64x64` | 图片水印的默认尺寸（宽x高） |
 | `selfCheck` | `boolean` | `true` | 启动时自检 python 环境 |
+| `promptTimeout` | `number` | `60000` | 交互式追问（请发送水印文字 / 图片）的等待时间（毫秒） |
 
 ## 🧠 它是怎么工作的
 

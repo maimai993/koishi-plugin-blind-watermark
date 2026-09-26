@@ -21,12 +21,10 @@ async function main() {
   console.log('脚本路径:', service && service.script)
 
   const names = []
-  const commander = ctx.$commander
   try {
-    if (commander && commander._commands) for (const key of commander._commands.keys()) names.push(key)
-    else if (commander && typeof commander.keys === 'function') for (const key of commander.keys()) names.push(key)
+    const list = ctx.$commander._commandList || []
+    for (const item of list) if (item && item.name) names.push(item.name)
   } catch { /* 忽略 */ }
-  if (!names.length) names.push(...['bwm', 'bwm.embed', 'bwm.extract', 'bwm.embed.logo', 'bwm.extract.logo', 'bwm.info'])
   console.log('已注册命令:', names.filter((name) => name.indexOf('bwm') === 0).join(', ') || '(未探测到)')
 
   let failed = 0
