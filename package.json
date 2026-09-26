@@ -1,0 +1,41 @@
+{
+  "name": "koishi-plugin-blind-watermark",
+  "version": "0.1.0",
+  "description": "盲水印：往图片里嵌入看不见的水印（文字 / 图片），需要时再从图片里原样提取出来 —— 基于 guofei9987/blind_watermark（DWT-DCT-SVD，抗缩放 / 裁剪 / 旋转 / 截屏等攻击）",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "python",
+    "readme.md",
+    "LICENSE.blind_watermark"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build",
+    "test": "node tests/bridge-test.mjs"
+  },
+  "license": "MIT",
+  "keywords": [
+    "blind-watermark",
+    "watermark",
+    "steganography",
+    "image",
+    "dwt",
+    "koishi-plugin"
+  ],
+  "peerDependencies": {
+    "koishi": "^4.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "koishi": "^4.16.0",
+    "typescript": "^5.0.0"
+  },
+  "koishi": {
+    "description": {
+      "zh": "把 guofei9987/blind_watermark 搬进 Koishi：给图片打上「看不见」的盲水印（文字或另一张图），图片看起来和原图几乎没区别，但随时可以把水印提取出来 —— 加过水印的图哪怕被缩放、裁剪、旋转、截图、PS 亮度，水印依然能读出来。适合给自媒体的图、公司内部资料、群里发的截图做溯源标记。"
+    }
+  }
+}

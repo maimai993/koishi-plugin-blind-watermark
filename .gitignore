@@ -1,0 +1,9 @@
+node_modules
+lib
+*.log
+data
+_test
+smoke.out.txt
+smoke.err.txt
+__pycache__/
+*.pyc
