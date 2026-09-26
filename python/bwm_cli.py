@@ -13,6 +13,9 @@
     python bwm_cli.py embed  --img carrier.png --out out.png --logo logo.png
     python bwm_cli.py extract --img out.png [--bits 512,256,128]
     python bwm_cli.py extract --img out.png --logo logo.png --out-wm wm.png
+    python bwm_cli.py extract --img cropped.png --original original.png   # 被裁剪过：用原图复原画布再提取
+    python bwm_cli.py extract --img cropped.png --canvas 1108x738 --offset 40,20
+    python bwm_cli.py locate  --img cropped.png --original original.png   # 只做定位
 
 协议（文字水印，默认 mode=packet）：
     水印被编码成固定长度的 bit 流，格式为
@@ -23,6 +26,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -36,6 +40,9 @@ try:
     sys.stderr.reconfigure(encoding='utf-8')
 except Exception:
     pass
+
+# numpy 由 import_cv2_numpy() 赋值，模块级辅助函数（画布复原等）也要用它
+np = None
 
 MAGIC = 0xB7
 HEADER_BYTES = 3  # magic + length + checksum
@@ -79,12 +86,14 @@ def load_lib():
 
 
 def import_cv2_numpy():
+    global np
     try:
-        import numpy as np
+        import numpy
         import cv2
     except Exception as error:
         fail('missing-deps', '缺少 numpy / opencv-python：%s' % error,
              hint='pip install numpy opencv-python PyWavelets')
+    np = numpy
     return np, cv2
 
 
@@ -102,6 +111,86 @@ def capacity_of(shape):
     height, width = shape[0], shape[1]
     ca_h, ca_w = (height + 1) // 2, (width + 1) // 2
     return (ca_h // 4) * (ca_w // 4)
+
+
+def parse_size(value):
+    """把 1108x738 解析成 (宽, 高)"""
+    match = re.match(r'^\s*(\d+)\s*[xX*×]\s*(\d+)\s*$', str(value or ''))
+    if not match:
+        fail('bad-arg', '--canvas 格式应为 宽x高，例如 1108x738')
+    return int(match.group(1)), int(match.group(2))
+
+
+def parse_offset(value):
+    """把 40,20 解析成 (x, y)"""
+    match = re.match(r'^\s*(\d+)\s*[,，]\s*(\d+)\s*$', str(value or ''))
+    if not match:
+        fail('bad-arg', '--offset 格式应为 x,y，例如 40,20')
+    return int(match.group(1)), int(match.group(2))
+
+
+def to_gray(img, cv2):
+    if img.ndim == 2:
+        return img
+    if img.shape[2] == 4:
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+def to_bgr(img, cv2):
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if img.shape[2] == 4:
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return img
+
+
+def locate_in_original(cropped, original, cv2, scale_search=False, min_score=0.9):
+    """在被裁剪的图和「原图」之间做模板匹配，找出裁剪块在原图里的位置（必要时还会搜缩放）"""
+    gray_original = to_gray(original, cv2)
+    gray_cropped = to_gray(cropped, cv2)
+
+    def match(scale):
+        width = max(1, int(round(gray_cropped.shape[1] * scale)))
+        height = max(1, int(round(gray_cropped.shape[0] * scale)))
+        if height > gray_original.shape[0] or width > gray_original.shape[1]:
+            return None
+        interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+        template = cv2.resize(gray_cropped, (width, height), interpolation=interpolation)
+        result = cv2.matchTemplate(gray_original, template, cv2.TM_CCOEFF_NORMED)
+        _, score, _, loc = cv2.minMaxLoc(result)
+        return {'x': int(loc[0]), 'y': int(loc[1]), 'w': width, 'h': height,
+                'score': float(score), 'scale': float(scale)}
+
+    best = match(1.0)
+    if scale_search and (best is None or best['score'] < min_score):
+        for scale in np.linspace(0.3, 2.0, 35):
+            got = match(float(scale))
+            if got and (best is None or got['score'] > best['score']):
+                best = got
+        if best:
+            low = max(0.2, best['scale'] - 0.06)
+            high = min(2.4, best['scale'] + 0.06)
+            for scale in np.linspace(low, high, 25):
+                got = match(float(scale))
+                if got and got['score'] > best['score']:
+                    best = got
+    return best
+
+
+def build_canvas(cropped, canvas_shape, loc, cv2):
+    """把裁剪块放回原图大小的画布上（没覆盖到的地方填 0）：水印的分块网格是按原始尺寸排的，位置对上就能提取"""
+    height, width = canvas_shape[0], canvas_shape[1]
+    canvas = np.zeros((height, width, 3), np.uint8)
+    piece = cropped
+    if abs(loc['scale'] - 1.0) > 1e-3:
+        piece = cv2.resize(cropped, (loc['w'], loc['h']))
+    piece = to_bgr(piece, cv2)
+    y, x = loc['y'], loc['x']
+    if y + piece.shape[0] > height or x + piece.shape[1] > width:
+        fail('bad-arg', '裁剪块超出原图范围，请检查原图/尺寸是否正确')
+    canvas[y:y + piece.shape[0], x:x + piece.shape[1]] = piece
+    return canvas
 
 
 def maybe_resize(img, max_size, cv2):
@@ -193,6 +282,50 @@ def cmd_capacity(args):
     out({'ok': True, 'capacity': cap, 'shape': [img.shape[1], img.shape[0]]})
 
 
+def recover_for_extract(cropped, args, cv2, np):
+    """按 --original（推荐）或 --canvas + --offset 把裁剪块放回原图大小的画布上。
+
+    原理：水印的分块网格是按「原图尺寸」划分的，裁剪会让网格整体错位，
+    所以先把裁剪块按正确的位置/尺寸放回原尺寸画布，再提取。
+    """
+    if args.original:
+        original = read_image(args.original, cv2)
+        loc = locate_in_original(cropped, original, cv2, scale_search=args.scale_search)
+        if not loc:
+            fail('bad-arg', '裁剪图比原图还大，定位失败；可以加 --scale-search 让插件搜一下缩放')
+        canvas = build_canvas(cropped, (original.shape[0], original.shape[1]), loc, cv2)
+        return {'image': canvas, 'info': {
+            'mode': 'original', 'x': loc['x'], 'y': loc['y'],
+            'score': round(loc['score'], 4), 'scale': round(loc['scale'], 4),
+            'canvas': [original.shape[1], original.shape[0]],
+        }}
+    if not args.canvas:
+        fail('bad-arg', '需要 --original（原图）或 --canvas（原图尺寸 宽x高）+ --offset（裁剪位置 x,y）')
+    width, height = parse_size(args.canvas)
+    x, y = parse_offset(args.offset or '0,0')
+    loc = {'x': x, 'y': y, 'w': cropped.shape[1], 'h': cropped.shape[0], 'score': 1.0, 'scale': 1.0}
+    canvas = build_canvas(cropped, (height, width), loc, cv2)
+    return {'image': canvas, 'info': {
+        'mode': 'canvas', 'x': x, 'y': y, 'score': 1.0, 'scale': 1.0, 'canvas': [width, height],
+    }}
+
+
+def cmd_locate(args):
+    """只做定位：告诉调用方这张裁剪图在原图里的位置/缩放，方便自己判断"""
+    np, cv2 = import_cv2_numpy()
+    cropped = read_image(args.img, cv2)
+    original = read_image(args.original, cv2)
+    loc = locate_in_original(cropped, original, cv2, scale_search=args.scale_search)
+    if not loc:
+        fail('bad-arg', '定位失败：裁剪图可能比原图大（试试 --scale-search）')
+    loc.update({
+        'ok': True,
+        'original': [original.shape[1], original.shape[0]],
+        'cropped': [cropped.shape[1], cropped.shape[0]],
+    })
+    out(loc)
+
+
 def cmd_embed(args):
     WaterMark, version = load_lib()
     np, cv2 = import_cv2_numpy()
@@ -264,6 +397,10 @@ def cmd_extract(args):
     WaterMark, version = load_lib()
     np, cv2 = import_cv2_numpy()
     img = read_image(args.img, cv2)
+    recovery = None
+    if args.original or args.canvas:
+        recovery = recover_for_extract(img, args, cv2, np)
+        img = recovery['image']
     capacity = capacity_of(img.shape)
 
     mode = args.mode
@@ -292,7 +429,7 @@ def cmd_extract(args):
         for bits in usable:
             try:
                 bwm = WaterMark(password_wm=int(args.password_watermark), password_img=int(args.password_image))
-                watermark = bwm.extract(filename=args.img, wm_shape=bits, mode='bit')
+                watermark = bwm.extract(embed_img=img, wm_shape=bits, mode='bit')
             except Exception as error:
                 tried.append({'bits': bits, 'error': '%s: %s' % (type(error).__name__, error)})
                 continue
@@ -307,6 +444,7 @@ def cmd_extract(args):
                     'bits': bits,
                     'capacity': capacity,
                     'size': [img.shape[1], img.shape[0]],
+                    'recovered': recovery['info'] if recovery else None,
                     'elapsed': round(time.time() - started, 3),
                     'version': version,
                 })
@@ -315,9 +453,11 @@ def cmd_extract(args):
             'ok': True,
             'mode': 'packet',
             'found': False,
-            'message': '没有提取到有效水印（可能没打过水印、密码不对，或图片被压缩/缩放破坏了）',
+            'message': '没有提取到有效水印（可能没打过水印、密码不对，或图片被压缩/缩放破坏了）'
+                       + ('；已按原图复原画布' if recovery else '；如果这张图被裁剪过，用 --original 传原图 / bwm.recover 复原后再试'),
             'capacity': capacity,
             'tried': tried,
+            'recovered': recovery['info'] if recovery else None,
             'elapsed': round(time.time() - started, 3),
         })
         return
@@ -327,7 +467,7 @@ def cmd_extract(args):
             fail('bad-arg', 'str 模式需要 --wm-shape（embed 时返回的 bits）')
         try:
             bwm = WaterMark(password_wm=int(args.password_watermark), password_img=int(args.password_image))
-            text = bwm.extract(filename=args.img, wm_shape=int(args.wm_shape), mode='str')
+            text = bwm.extract(embed_img=img, wm_shape=int(args.wm_shape), mode='str')
         except Exception as error:
             fail('error', '%s: %s' % (type(error).__name__, error))
         out({'ok': True, 'mode': 'str', 'found': True, 'text': text,
@@ -353,7 +493,7 @@ def cmd_extract(args):
         os.makedirs(os.path.dirname(os.path.abspath(out_wm)), exist_ok=True)
         try:
             bwm = WaterMark(password_wm=int(args.password_watermark), password_img=int(args.password_image))
-            bwm.extract(filename=args.img, wm_shape=wm_shape, out_wm_name=out_wm, mode='img')
+            bwm.extract(embed_img=img, wm_shape=wm_shape, out_wm_name=out_wm, mode='img')
         except AssertionError as error:
             fail('capacity', str(error), capacity=capacity)
         except Exception as error:
@@ -397,9 +537,19 @@ def main():
     p_extract.add_argument('--mode', default='auto', choices=['auto', 'packet', 'str', 'img'])
     p_extract.add_argument('--bits', default='')
     p_extract.add_argument('--wm-shape')
+    p_extract.add_argument('--original', help='原图（没被裁剪过的那张），用于定位并复原画布')
+    p_extract.add_argument('--canvas', help='原图尺寸 宽x高（没有原图文件时用这个）')
+    p_extract.add_argument('--offset', help='裁剪块在原图里的位置 x,y（配合 --canvas）')
+    p_extract.add_argument('--scale-search', action='store_true', help='模板匹配时同时搜索缩放比例')
     p_extract.add_argument('--password-image', type=int, default=1)
     p_extract.add_argument('--password-watermark', type=int, default=1)
     p_extract.set_defaults(func=cmd_extract)
+
+    p_locate = sub.add_parser('locate')
+    p_locate.add_argument('--img', required=True)
+    p_locate.add_argument('--original', required=True)
+    p_locate.add_argument('--scale-search', action='store_true')
+    p_locate.set_defaults(func=cmd_locate)
 
     args = parser.parse_args()
     if not getattr(args, 'func', None):

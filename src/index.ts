@@ -312,7 +312,14 @@ export function apply(ctx: Context, config: Config) {
         passwordWatermark: toNumber(options.watermarkPassword, config.passwordWatermark),
       })
       if (!result.ok) return describeError(result)
-      if (!result.found) return result.message || '没有提取到水印（可能没打过水印、密码不对，或图片被压坏了）。'
+      if (!result.found) {
+        return [
+          '没有提取到水印。可能的原因：',
+          '· 这张图没打过水印，或打水印用的密码不是默认值（用 -p / -w 指定）',
+          '· 图片被压得太狠（微信「压缩原图」、JPG 二次压缩）',
+          '· **这张图被裁剪过**：水印是按原图尺寸的固定网格嵌入的，裁剪会让网格错位 → 引用原图 + 这张图发 bwm.recover，插件会把裁剪块复原回原尺寸再提取',
+        ].join(String.fromCharCode(10))
+      }
       return '水印内容：' + result.text + '\n（位宽 ' + result.bits + ' bit，耗时 ' + result.elapsed + ' 秒）'
     })
 
@@ -391,6 +398,81 @@ export function apply(ctx: Context, config: Config) {
       if (!result.ok || !result.buffer) return describeError(result)
       await session.send('水印已提取 ✅（' + (result.wmShape || []).join('x') + '，耗时 ' + result.elapsed + ' 秒）')
       return h.image(result.buffer, 'image/png')
+    })
+
+  root.subcommand('.recover [canvas:string]', '图被裁剪过？先把裁剪块复原回原尺寸再提取水印')
+    .alias('bwm.recoverCrop')
+    .usage('水印是按「原图尺寸」的固定 8x8 网格嵌入的：只要裁剪动了左上角原点，整张网格就错位，直接提取必然失败（从右下角裁也一样，因为每行的分块数变了）。\n'
+      + '· 用法一：引用「原图」（没被裁剪过的那张），再把「被裁剪过的图」发出来\n'
+      + '· 用法二：一次发两张图，第一张是原图，第二张是被裁剪的图\n'
+      + '· 用法三：没有原图就给出原图尺寸和裁剪位置：bwm.recover 1108x738 -O 40,20（只需被裁剪的那张图）')
+    .example('bwm.recover')
+    .example('bwm.recover 1108x738 -O 40,20')
+    .option('offset', '-O <offset:string> 裁剪块在原图里的位置 x,y（配合尺寸一起用，如 -O 40,20）')
+    .option('scaleSearch', '-s 顺便搜索缩放比例（图被裁完又缩放/截图过时用）')
+    .option('bits', '-b <bits:number> 位宽')
+    .option('password', '-p <password:number> 图片密码（默认 ' + config.passwordImage + '）')
+    .option('watermarkPassword', '-w <password:number> 水印密码（默认 ' + config.passwordWatermark + '）')
+    .action(async ({ session, options }, canvas) => {
+      const parts = readMessage(session.event?.message?.content ?? session.event?.message, session)
+      const quoted = quotedImages(session)
+      const all = quoted.concat(parts.images)
+      let originalUrl = ''
+      let suspectUrl = ''
+
+      if (canvas) {
+        suspectUrl = all[0] || ''
+        if (!suspectUrl) suspectUrl = (await askImage(session, '请发送（或引用）**被裁剪过的图片**'))[0] || ''
+        if (!suspectUrl) return '没有收到图片，已取消。'
+      } else if (quoted.length && parts.images.length) {
+        originalUrl = quoted[0]
+        suspectUrl = parts.images[0]
+      } else if (all.length >= 2) {
+        originalUrl = all[0]
+        suspectUrl = all[1]
+      } else if (all.length === 1) {
+        suspectUrl = all[0]
+        const got = await askImage(session, '这张我当作「被裁剪过的图」。请再发送「**原图**」（没被裁剪过的那张）')
+        originalUrl = got[0] || ''
+        if (!originalUrl) {
+          return '没有收到原图，已取消。也可以不给原图，改成给尺寸和位置：bwm.recover 1108x738 -O 40,20'
+        }
+      } else {
+        originalUrl = (await askImage(session, '第 1 步：请发送（或引用）**原图**（没被裁剪过的那张）'))[0] || ''
+        if (!originalUrl) return '没有收到原图，已取消。'
+        suspectUrl = (await askImage(session, '第 2 步：请发送**被裁剪过的图片**'))[0] || ''
+        if (!suspectUrl) return '没有收到被裁剪的图片，已取消。'
+      }
+
+      let suspectImage: Buffer
+      let originalImage: Buffer | undefined
+      try {
+        suspectImage = await downloadImage(ctx, suspectUrl)
+        if (originalUrl) originalImage = await downloadImage(ctx, originalUrl)
+      } catch (error: any) {
+        return '下载图片失败：' + (error?.message || error)
+      }
+
+      const result = await service.extractText(suspectImage, {
+        bits: toNumber(options.bits) ? [toNumber(options.bits) as number] : config.candidateBits,
+        original: originalImage,
+        canvas: canvas || '',
+        offset: options.offset ? String(options.offset) : '',
+        scaleSearch: !!options.scaleSearch,
+        passwordImage: toNumber(options.password, config.passwordImage),
+        passwordWatermark: toNumber(options.watermarkPassword, config.passwordWatermark),
+      })
+      if (!result.ok) return describeError(result)
+
+      const info: any = result.recovered
+      const detail = info
+        ? '复原：在原图 (' + info.x + ',' + info.y + ') 处找到裁剪块（相似度 ' + info.score + (info.scale && info.scale !== 1 ? '，缩放 ' + info.scale : '') + '），画布 ' + (info.canvas || []).join('x')
+        : ''
+      if (!result.found) {
+        return '复原后仍然没有提取到水印。\n' + (detail ? detail + '\n' : '')
+          + '可以再试：加 -s 搜索缩放、确认密码（-p / -w）、或者确认这张图确实是打过水印的那张。'
+      }
+      return '水印内容：' + result.text + '\n（位宽 ' + result.bits + ' bit，耗时 ' + result.elapsed + ' 秒）\n' + detail
     })
 
   root.subcommand('.info', '盲水印环境自检')

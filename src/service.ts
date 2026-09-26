@@ -21,6 +21,21 @@ export interface ServiceOptions {
   keepTemp: boolean
 }
 
+/** 提取时的额外参数：被裁剪过的图可以传原图（或原图尺寸 + 裁剪位置）来复原画布 */
+export interface ExtractOptions {
+  bits?: number[] | string
+  passwordImage?: number
+  passwordWatermark?: number
+  /** 原图（没被裁剪过的那张），用于模板匹配定位 + 复原画布 */
+  original?: Buffer
+  /** 没有原图文件时：原图尺寸，格式 宽x高（如 1108x738） */
+  canvas?: string
+  /** 配合 canvas：裁剪块在原图里的位置，格式 x,y */
+  offset?: string
+  /** 模板匹配时同时搜索缩放比例 */
+  scaleSearch?: boolean
+}
+
 export interface TextEmbedResult extends BridgeResult {
   buffer?: Buffer
 }
@@ -158,9 +173,10 @@ export class BlindWatermarkService {
   }
 
   /** 文字水印提取：自动按候选位宽尝试，返回 result.text */
-  async extractText(image: Buffer, options: { bits?: number[] | string; passwordImage?: number; passwordWatermark?: number } = {}): Promise<TextExtractResult> {
+  async extractText(image: Buffer, options: ExtractOptions = {}): Promise<TextExtractResult> {
     const bits = options.bits ?? this.options.candidateBits
     const input = await this.writeTemp(image)
+    let originalPath = ''
     try {
       const args = [
         'extract',
@@ -170,9 +186,32 @@ export class BlindWatermarkService {
       ]
       const list = Array.isArray(bits) ? bits : String(bits)
       args.push('--bits', Array.isArray(list) ? list.join(',') : list)
+      // 被裁剪过的图：先把裁剪块按原图位置/尺寸复原成原尺寸画布，再提取
+      if (options.original) {
+        originalPath = await this.writeTemp(options.original)
+        args.push('--original', originalPath)
+      } else if (options.canvas) {
+        args.push('--canvas', options.canvas)
+        if (options.offset) args.push('--offset', options.offset)
+      }
+      if (options.scaleSearch) args.push('--scale-search')
       return await this.run(args) as TextExtractResult
     } finally {
-      await this.remove(input)
+      await this.remove(input, originalPath)
+    }
+  }
+
+  /** 只做定位：告诉调用方裁剪图在原图里的位置与缩放 */
+  async locate(image: Buffer, original: Buffer, options: { scaleSearch?: boolean } = {}): Promise<BridgeResult> {
+    const input = await this.writeTemp(image)
+    let originalPath = ''
+    try {
+      originalPath = await this.writeTemp(original)
+      const args = ['locate', '--img', input, '--original', originalPath]
+      if (options.scaleSearch) args.push('--scale-search')
+      return await this.run(args)
+    } finally {
+      await this.remove(input, originalPath)
     }
   }
 

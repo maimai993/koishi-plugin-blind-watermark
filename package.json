@@ -14,7 +14,7 @@
     "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build",
-    "test": "node tests/bridge-test.mjs"
+    "test": "node tests/koishi-smoke.cjs && node tests/command-test.cjs && node tests/bridge-test.mjs && node tests/recover-test.mjs"
   },
   "license": "MIT",
   "keywords": [

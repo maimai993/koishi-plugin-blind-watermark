@@ -7,8 +7,9 @@
  *   node tests/command-test.cjs
  */
 const { Context, h } = require('koishi')
-const { readFile } = require('node:fs/promises')
+const { readFile, writeFile, mkdir } = require('node:fs/promises')
 const { join } = require('node:path')
+const { execFileSync } = require('node:child_process')
 const plugin = require('../lib/index.js')
 
 const root = join(__dirname, '..')
@@ -117,6 +118,39 @@ async function main() {
   const s7 = makeSession([{ type: 'text', attrs: { content: '/bwm.embed 麦麦' } }], [])
   const r7 = await runAction(embed, s7.session, ['麦麦'])
   check('没有图片时给出提示', /没有收到图片|请发送/.test(String(r7)), String(r7))
+
+  console.log('7) bwm.recover：引用原图 + 发被裁剪的图')
+  if (watermarked) {
+    const work = join(root, '_tmp_test')
+    await mkdir(work, { recursive: true })
+    await writeFile(join(work, 'cmd_wm.png'), watermarked)
+    execFileSync(process.env.PYTHON || 'python', ['-c', [
+      'import cv2',
+      "img = cv2.imread(r'" + join(work, 'cmd_wm.png') + "')",
+      "cv2.imwrite(r'" + join(work, 'cmd_crop.png') + "', img[:, 40:])",
+    ].join(String.fromCharCode(10))])
+    const cropUrl = 'data:image/png;base64,' + (await readFile(join(work, 'cmd_crop.png'))).toString('base64')
+    const recover = ctx.$commander._commandList.find((item) => item.name === 'bwm.recover')
+    check('bwm.recover 已注册', !!recover)
+
+    // 用法一：引用原图 + 发送被裁剪的图
+    const s8 = makeSession(
+      [{ type: 'text', attrs: { content: '/bwm.recover' } }, h.image(cropUrl)],
+      [],
+      { content: [h.image(dataUrl)] },
+    )
+    const r8 = await runAction(recover, s8.session, [])
+    check('复原后提取到水印', /水印内容：麦麦/.test(String(r8)), String(r8).split(String.fromCharCode(10))[0])
+    check('回复里给出复原位置', /复原：/.test(String(r8)), String(r8).split(String.fromCharCode(10)).slice(-1)[0])
+
+    // 用法二：交互式，先原图后被裁剪的图
+    const s9 = makeSession(
+      [{ type: 'text', attrs: { content: '/bwm.recover' } }],
+      ['<img src="' + dataUrl + '"/>', '<img src="' + cropUrl + '"/>'],
+    )
+    const r9 = await runAction(recover, s9.session, [])
+    check('交互式复原并提取', /水印内容：麦麦/.test(String(r9)), String(r9).split(String.fromCharCode(10))[0])
+  }
 
   await ctx.stop()
   console.log(failed ? '\n失败 ' + failed + ' 项' : '\n命令层测试全部通过 ✅')

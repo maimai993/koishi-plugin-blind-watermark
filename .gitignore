@@ -2,6 +2,8 @@ node_modules
 lib
 *.log
 data
+_tmp
+_tmp_test
 _test
 smoke.out.txt
 smoke.err.txt
