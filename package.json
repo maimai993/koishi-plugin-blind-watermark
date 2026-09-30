@@ -6,7 +6,9 @@
   "typings": "lib/index.d.ts",
   "files": [
     "lib",
-    "python",
+    "python/bwm_cli.py",
+    "python/blind_watermark/*.py",
+    "python/blind_watermark/requirements.txt",
     "readme.md",
     "LICENSE.blind_watermark"
   ],

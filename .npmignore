@@ -1,0 +1,19 @@
+# 不要把 Python 字节码缓存打进包：这些 .pyc 是按编译时的 Python 版本打标签的
+# （例如 cpython-311），装到别的 Python 版本上根本不会被加载，纯属体积浪费。
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 开发用文件（files 字段是白名单，这里再兜一层，防止以后被误加进去）
+upstream/
+tests/
+tsconfig.json
+.gitignore
+.npmignore
+*.log
+_tmp*/
+_tmp_test/
+_test/
+smoke.out.txt
+smoke.err.txt
